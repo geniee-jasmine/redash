@@ -1,3 +1,5 @@
+import re
+from croniter import croniter
 import datetime
 import functools
 import hashlib
@@ -683,10 +685,14 @@ class QueryResult(db.Model, BelongsToOrgMixin):
 
 
 def should_schedule_next(previous_iteration, now, schedule, failures):
+
+    if schedule is None or not schedule:
+        return False
+
     if schedule.isdigit():
         ttl = int(schedule)
         next_iteration = previous_iteration + datetime.timedelta(seconds=ttl)
-    else:
+    elif ":" in schedule:
         hour, minute = schedule.split(':')
         hour, minute = int(hour), int(minute)
 
@@ -699,8 +705,14 @@ def should_schedule_next(previous_iteration, now, schedule, failures):
             previous_iteration = normalized_previous_iteration - datetime.timedelta(days=1)
 
         next_iteration = (previous_iteration + datetime.timedelta(days=1)).replace(hour=hour, minute=minute)
+    else:
+        future_dates = croniter(schedule, previous_iteration + datetime.timedelta(hours=9))
+        now += datetime.timedelta(hours=9)
+        next_iteration = future_dates.get_next(datetime.datetime)
+
     if failures:
         next_iteration += datetime.timedelta(minutes=2**failures)
+
     return now > next_iteration
 
 
@@ -725,7 +737,7 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
                                        foreign_keys=[last_modified_by_id])
     is_archived = Column(db.Boolean, default=False, index=True)
     is_draft = Column(db.Boolean, default=True, index=True)
-    schedule = Column(db.String(10), nullable=True)
+    schedule = Column(db.Text, nullable=True)
     schedule_failures = Column(db.Integer, default=0)
     visualizations = db.relationship("Visualization", cascade="all, delete-orphan")
     options = Column(MutableDict.as_mutable(PseudoJSON), default={})
@@ -827,7 +839,7 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
     def outdated_queries(cls):
         queries = (db.session.query(Query)
                    .options(joinedload(Query.latest_query_data).load_only('retrieved_at'))
-                   .filter(Query.schedule != None)
+                   .filter(Query.schedule != None, Query.data_source_id != None)
                    .order_by(Query.id))
 
         now = utils.utcnow()
@@ -841,7 +853,6 @@ class Query(ChangeTrackingMixin, TimestampMixin, BelongsToOrgMixin, db.Model):
             if should_schedule_next(retrieved_at, now, query.schedule, query.schedule_failures):
                 key = "{}:{}".format(query.query_hash, query.data_source_id)
                 outdated_queries[key] = query
-
         return outdated_queries.values()
 
     @classmethod
